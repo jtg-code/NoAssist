@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from concurrent.futures import Future
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -59,14 +60,13 @@ class McpServer:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def start(self) -> "McpServer":
-        ready: asyncio.Future = asyncio.run_coroutine_threadsafe(
+        self._task: Future[None] = asyncio.run_coroutine_threadsafe(
             self._lifecycle(), self._loop
         )
         # Wartet, bis verbunden (oder der Verbindungsaufbau fehlgeschlagen ist).
         self._ready.wait()
         if self._error:
-            ready.result()  # wirft die ursprüngliche Exception
-        self._task = ready
+            self._task.result()  # wirft die ursprüngliche Exception
         return self
 
     async def _lifecycle(self) -> None:
@@ -89,6 +89,7 @@ class McpServer:
                 streamable_http_client(self.url)
             )
         else:
+            assert self.command
             params = StdioServerParameters(
                 command=self.command, args=self.args, env=self.env
             )
@@ -121,9 +122,13 @@ class McpServer:
         )
 
     def _call(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        result = self._run(self._session.call_tool(tool_name, arguments))
+        session = self._session
+        assert session, "Server nicht gestartet"
+        result = self._run(session.call_tool(tool_name, arguments))
         text = "\n".join(
-            part.text for part in result.content if getattr(part, "type", "") == "text"
+            getattr(part, "text", "")
+            for part in result.content
+            if getattr(part, "type", "") == "text"
         )
         if _attr(result, "is_error", "isError"):
             return f"Fehler: {text}"
