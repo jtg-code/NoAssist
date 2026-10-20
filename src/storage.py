@@ -381,6 +381,12 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "system_prompt": "",
         "default_provider": "lmstudio",
         "default_model": None,
+        "agent_provider": None,
+        "agent_model": None,
+        "subagent_provider": None,
+        "subagent_model": None,
+        "assistant_provider": None,
+        "assistant_model": None,
     },
     "providers": [
         {"id": "lmstudio", "type": "lmstudio", "name": "LM Studio", "enabled": True},

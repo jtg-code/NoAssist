@@ -19,6 +19,7 @@ const els = {
   openSettings: $('open-settings'),
   providerSelect: $('provider-select'),
   modelSelect: $('model-select'),
+  reasoningSelect: $('reasoning-select'),
   providerDot: $('provider-dot'),
   themeToggle: $('theme-toggle'),
   messages: $('messages'),
@@ -43,6 +44,7 @@ const state = {
   chat: null,
   providerId: null,
   model: '', // '' = Standard des Providers (wird als null gesendet)
+  reasoning: '', // '' = Standard des Modells (wird als null gesendet)
   busy: false,
   sending: false,
   turn: null, // laufender Turn im aktiven Chat
@@ -56,7 +58,7 @@ const state = {
   modelSeq: 0,
 };
 
-const STORAGE = { theme: 'noassist.theme', draft: 'noassist.draft', sidebar: 'noassist.sidebar' };
+const STORAGE = { theme: 'noassist.theme', draft: 'noassist.draft', sidebar: 'noassist.sidebar', reasoning: 'noassist.reasoning' };
 const narrowMq = window.matchMedia('(max-width: 799.98px)');
 
 // ---------- kleine Helfer ----------
@@ -474,11 +476,69 @@ function setDot(dot, stateName, label) {
   dot.title = label;
 }
 
+// ---------- Reasoning-Stufe (Eingabe) ----------
+
+const REASONING_LABEL = {
+  off: 'Aus',
+  minimal: 'Minimal',
+  low: 'Niedrig',
+  medium: 'Mittel',
+  high: 'Hoch',
+  xhigh: 'Sehr hoch',
+  max: 'Maximal',
+};
+
+/** Stufen je Provider-Typ; leer = Provider unterstützt keine Reasoning-Stufe. */
+const REASONING_LEVELS = {
+  claude_agent: ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
+  openai: ['minimal', 'low', 'medium', 'high'],
+};
+
+function reasoningLevels(pid) {
+  return REASONING_LEVELS[providerById(pid)?.type] || [];
+}
+
+function savedReasoning(pid) {
+  try {
+    return JSON.parse(load(STORAGE.reasoning) || '{}')[pid] || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveReasoning(pid, value) {
+  let map = {};
+  try {
+    map = JSON.parse(load(STORAGE.reasoning) || '{}') || {};
+  } catch {
+    map = {};
+  }
+  if (value) map[pid] = value;
+  else delete map[pid];
+  store(STORAGE.reasoning, JSON.stringify(map));
+}
+
+function renderReasoningSelect() {
+  const sel = els.reasoningSelect;
+  const levels = reasoningLevels(state.providerId);
+  if (!levels.includes(state.reasoning)) state.reasoning = '';
+  sel.replaceChildren(
+    h('option', { value: '' }, levels.length ? 'Reasoning: Standard' : 'Reasoning: –'),
+    ...levels.map((l) => h('option', { value: l }, `Reasoning: ${REASONING_LABEL[l]}`)),
+  );
+  sel.value = state.reasoning;
+  sel.hidden = !state.providerId;
+  sel.disabled = state.busy || !levels.length;
+  sel.title = levels.length ? 'Reasoning-Stufe' : 'Dieser Provider unterstützt keine Reasoning-Stufe.';
+}
+
 /** Provider/Modell setzen; persist=true speichert die Auswahl am aktiven Chat. */
 async function selectProvider(pid, model, { persist = false } = {}) {
   state.providerId = pid;
   state.model = model ?? '';
+  state.reasoning = pid ? savedReasoning(pid) : '';
   renderProviderSelect();
+  renderReasoningSelect();
   refreshStatus(pid);
   const loading = loadHeaderModels(pid);
   if (persist) persistChatModel();
@@ -844,6 +904,7 @@ function setBusy(busy) {
   btn.title = busy ? 'Antwort abbrechen (Esc)' : 'Senden (Enter)';
   els.providerSelect.disabled = busy;
   els.modelSelect.disabled = busy;
+  renderReasoningSelect();
   updateSendState();
 }
 
@@ -899,7 +960,7 @@ async function send(resendText) {
     clearTail(chatId);
     els.thread.querySelector('.empty-state')?.remove();
     const providerId = state.providerId;
-    const res = await api.sendMessage(chatId, { content: text, provider_id: providerId, model: state.model || null });
+    const res = await api.sendMessage(chatId, { content: text, provider_id: providerId, model: state.model || null, reasoning: state.reasoning || null });
     if (state.chatId !== chatId) return;
     els.thread.append(userMessage(res.user_message || { role: 'user', content: text }));
     scrollToBottom();
@@ -942,7 +1003,7 @@ async function retryTurn(chatId, userMessageId) {
   updateSendState();
   try {
     clearTail(chatId);
-    const body = { provider_id: providerId, model: state.model || null };
+    const body = { provider_id: providerId, model: state.model || null, reasoning: state.reasoning || null };
     if (messageId) body.user_message_id = messageId;
     const res = await api.retryMessage(chatId, body);
     if (state.chatId !== chatId) return;
@@ -1025,7 +1086,7 @@ function initKeyboard() {
 
 // ---------- Einstellungsdialog ----------
 
-const TABS = ['general', 'providers', 'tools'];
+const TABS = ['general', 'providers', 'tools', 'agents', 'roles'];
 
 function selectTab(name, { focus = false } = {}) {
   for (const t of TABS) {
@@ -1038,6 +1099,7 @@ function selectTab(name, { focus = false } = {}) {
     if (active && focus) tab.focus();
   }
   if (name === 'tools') renderToolsPanel();
+  if (name === 'agents') renderAgentsPanel();
 }
 
 function initTabs() {
@@ -1067,6 +1129,11 @@ async function openSettings(tab = 'general', { providerId = null, focus = null }
   renderGeneralPanel();
   renderProvidersPanel({ openId: providerId });
   $('panel-tools').replaceChildren();
+  delete $('panel-tools').dataset.loaded;
+  $('panel-agents').replaceChildren();
+  delete $('panel-agents').dataset.loaded;
+  agentsState = { agents: [], openId: null, creating: false };
+  renderRolesPanel();
   selectTab(tab);
   if (!els.settings.open) els.settings.showModal();
   const card = tab === 'providers' && providerId ? $('panel-providers').querySelector(`[data-provider="${CSS.escape(providerId)}"]`) : null;
@@ -1657,6 +1724,386 @@ async function renderToolsPanel() {
   panel.dataset.loaded = '1';
 }
 
+// --- Agenten ---
+
+const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
+
+function readFileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',', 2)[1] || '');
+    reader.onerror = () => reject(new Error(`„${file.name}“ konnte nicht gelesen werden.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Ablagefläche mit Dateiauswahl; onFiles(FileList-Array) wird bei Drop oder Auswahl aufgerufen. */
+function dropZone({ label, hint, accept, multiple, onFiles }) {
+  const input = h('input', { type: 'file', class: 'visually-hidden', accept, multiple: multiple || null, tabindex: '-1' });
+  const button = h('button', { type: 'button', class: 'btn' }, label);
+  const zone = h('div', { class: 'dropzone' }, h('p', {}, hint), button, input);
+  button.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => {
+    const files = [...input.files];
+    input.value = '';
+    if (files.length) onFiles(files);
+  });
+  let depth = 0;
+  const setOver = (on) => zone.classList.toggle('is-over', on);
+  zone.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    depth++;
+    setOver(true);
+  });
+  zone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  zone.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1);
+    if (!depth) setOver(false);
+  });
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    depth = 0;
+    setOver(false);
+    const files = [...(e.dataTransfer?.files || [])];
+    if (files.length) onFiles(multiple ? files : files.slice(0, 1));
+  });
+  return zone;
+}
+
+function agentFields(agent) {
+  const name = textField('Name', agent?.name, { maxlength: '100' });
+  const description = h('textarea', { class: 'textarea textarea-short', rows: '3', maxlength: '2000' });
+  description.value = agent?.description || '';
+  const prompt = h('textarea', { class: 'textarea textarea-prompt', rows: '10', spellcheck: 'false' });
+  prompt.value = agent?.prompt || '';
+  return {
+    name,
+    description,
+    prompt,
+    els: [
+      name.el,
+      field('Beschreibung', description),
+      field('Prompt', prompt, 'Anweisung des Agenten (Markdown).'),
+    ],
+    value: () => {
+      if (!name.input.value.trim()) throw new Error('Bitte einen Namen angeben.');
+      return { name: name.input.value.trim(), description: description.value, prompt: prompt.value };
+    },
+  };
+}
+
+function agentCard(agent, { open = false, onChange, onDelete }) {
+  const details = h('details', { class: 'provider-card', dataset: { agent: agent.id } });
+  details.open = open;
+  details.append(
+    h(
+      'summary',
+      {},
+      h('span', {}, agent.name || agent.id),
+      agent.assets.length ? h('span', { class: 'badge' }, `${agent.assets.length} ${agent.assets.length === 1 ? 'Asset' : 'Assets'}`) : null,
+    ),
+  );
+  const body = h('div', { class: 'provider-body' });
+  details.append(body);
+
+  const status = formStatus();
+  const fields = agentFields(agent);
+  const form = h('form', { novalidate: true }, ...fields.els);
+  const del = h('button', { type: 'button', class: 'btn btn-danger' }, 'Agent löschen');
+  form.append(h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'btn btn-primary' }, 'Speichern'), del, status));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    let data;
+    try {
+      data = fields.value();
+    } catch (err) {
+      setFormStatus(status, err.message, 'error');
+      return;
+    }
+    setFormStatus(status, 'Wird gespeichert …');
+    try {
+      onChange(await api.updateAgent(agent.id, data), { open: true });
+      toast('Agent gespeichert.');
+    } catch (err) {
+      setFormStatus(status, `Speichern fehlgeschlagen: ${err.message}`, 'error');
+    }
+  });
+  del.addEventListener('click', async () => {
+    const ok = await confirmDialog({ title: 'Agent löschen?', text: `„${agent.name || agent.id}“ wird mit allen Assets gelöscht.`, okLabel: 'Löschen' });
+    if (!ok) return;
+    try {
+      await api.deleteAgent(agent.id);
+      onDelete(agent);
+    } catch (err) {
+      setFormStatus(status, `Löschen fehlgeschlagen: ${err.message}`, 'error');
+    }
+  });
+
+  // Assets
+  const assetStatus = formStatus();
+  const list = h('ul', { class: 'asset-list' });
+  if (!agent.assets.length) list.append(h('li', { class: 'field-help' }, 'Keine Assets.'));
+  for (const asset of agent.assets) {
+    const rm = h('button', { type: 'button', class: 'btn btn-danger btn-small', 'aria-label': `Asset ${asset.name} löschen` }, 'Löschen');
+    rm.addEventListener('click', async () => {
+      const ok = await confirmDialog({ title: 'Asset löschen?', text: `„${asset.name}“ wird entfernt.`, okLabel: 'Löschen' });
+      if (!ok) return;
+      try {
+        onChange(await api.deleteAgentAsset(agent.id, asset.name), { open: true });
+      } catch (err) {
+        setFormStatus(assetStatus, `Löschen fehlgeschlagen: ${err.message}`, 'error');
+      }
+    });
+    list.append(
+      h(
+        'li',
+        {},
+        h('a', { href: api.agentAssetUrl(agent.id, asset.name), download: asset.name }, asset.name),
+        h('span', { class: 'field-help' }, formatSize(asset.size)),
+        rm,
+      ),
+    );
+  }
+  const upload = dropZone({
+    label: 'Assets hochladen',
+    hint: 'Dateien hierher ziehen oder auswählen.',
+    multiple: true,
+    onFiles: async (files) => {
+      setFormStatus(assetStatus, 'Wird hochgeladen …');
+      try {
+        const big = files.find((f) => f.size > MAX_UPLOAD_BYTES);
+        if (big) throw new Error(`„${big.name}“ ist zu groß.`);
+        const payload = await Promise.all(files.map(async (f) => ({ name: f.name, data: await readFileBase64(f) })));
+        onChange(await api.addAgentAssets(agent.id, payload), { open: true });
+        toast(`${files.length} ${files.length === 1 ? 'Asset' : 'Assets'} hochgeladen.`);
+      } catch (err) {
+        setFormStatus(assetStatus, `Hochladen fehlgeschlagen: ${err.message}`, 'error');
+      }
+    },
+  });
+  body.append(form, h('h4', {}, 'Assets'), list, upload, assetStatus);
+  return details;
+}
+
+let agentsState = { agents: [], openId: null, creating: false };
+let agentsRender = 0;
+
+async function renderAgentsPanel({ force = false } = {}) {
+  const panel = $('panel-agents');
+  if (!force && panel.dataset.loaded === '1') return;
+  const seq = ++agentsRender;
+  if (!panel.firstChild) panel.replaceChildren(h('h3', {}, 'Agents'), h('p', { class: 'panel-intro', role: 'status' }, 'Agents werden geladen …'));
+  try {
+    agentsState.agents = await api.listAgents();
+  } catch (e) {
+    if (seq !== agentsRender) return;
+    panel.replaceChildren(h('h3', {}, 'Agents'), errorBubble({ code: e.code, message: e.message }, { onRetry: () => renderAgentsPanel({ force: true }) }));
+    return;
+  }
+  if (seq !== agentsRender) return;
+  panel.dataset.loaded = '1';
+  drawAgents();
+}
+
+function drawAgents() {
+  const panel = $('panel-agents');
+  const { agents, openId } = agentsState;
+  const status = formStatus();
+
+  const importZone = dropZone({
+    label: 'Datei auswählen',
+    hint: 'Markdown-Datei (.md) oder ZIP (.zip mit .md und Assets) hierher ziehen, um einen Agenten zu erstellen.',
+    accept: '.md,.markdown,.zip',
+    multiple: false,
+    onFiles: async ([file]) => {
+      setFormStatus(status, 'Wird importiert …');
+      try {
+        if (file.size > MAX_UPLOAD_BYTES) throw new Error(`„${file.name}“ ist zu groß.`);
+        const created = await api.importAgent({ filename: file.name, data: await readFileBase64(file) });
+        agentsState.openId = created.id;
+        toast(`Agent „${created.name}“ erstellt.`);
+        await renderAgentsPanel({ force: true });
+        panel.querySelector(`[data-agent="${CSS.escape(created.id)}"] summary`)?.focus();
+      } catch (err) {
+        setFormStatus(status, `Import fehlgeschlagen: ${err.message}`, 'error');
+      }
+    },
+  });
+
+  const newBtn = h('button', { type: 'button', class: 'btn btn-primary' }, 'Neuer Agent');
+  const createBox = h('div', { class: 'agent-create' });
+  createBox.hidden = !agentsState.creating;
+  const showCreate = () => {
+    const fields = agentFields(null);
+    const createStatus = formStatus();
+    const cancel = h('button', { type: 'button', class: 'btn' }, 'Abbrechen');
+    const form = h(
+      'form',
+      { novalidate: true },
+      h('h4', {}, 'Neuer Agent'),
+      ...fields.els,
+      h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'btn btn-primary' }, 'Erstellen'), cancel, createStatus),
+    );
+    cancel.addEventListener('click', () => {
+      agentsState.creating = false;
+      createBox.hidden = true;
+      newBtn.focus();
+    });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      let data;
+      try {
+        data = fields.value();
+      } catch (err) {
+        setFormStatus(createStatus, err.message, 'error');
+        return;
+      }
+      setFormStatus(createStatus, 'Wird erstellt …');
+      try {
+        const created = await api.createAgent(data);
+        agentsState.creating = false;
+        agentsState.openId = created.id;
+        toast(`Agent „${created.name}“ erstellt.`);
+        await renderAgentsPanel({ force: true });
+        panel.querySelector(`[data-agent="${CSS.escape(created.id)}"] summary`)?.focus();
+      } catch (err) {
+        setFormStatus(createStatus, `Erstellen fehlgeschlagen: ${err.message}`, 'error');
+      }
+    });
+    createBox.replaceChildren(form);
+    createBox.hidden = false;
+    agentsState.creating = true;
+    fields.name.input.focus();
+  };
+  newBtn.addEventListener('click', showCreate);
+
+  const replaceCard = (stale, updated, { open }) => {
+    const card = panel.querySelector(`[data-agent="${CSS.escape(updated.id)}"]`) || stale;
+    const idx = agentsState.agents.findIndex((a) => a.id === updated.id);
+    if (idx >= 0) agentsState.agents[idx] = updated;
+    agentsState.openId = open ? updated.id : agentsState.openId;
+    const fresh = makeCard(updated, open);
+    card.replaceWith(fresh);
+    if (document.activeElement === document.body || !panel.contains(document.activeElement)) fresh.querySelector('summary')?.focus();
+  };
+  const makeCard = (agent, open) => {
+    const card = agentCard(agent, {
+      open,
+      onChange: (updated, opts) => replaceCard(card, updated, opts),
+      onDelete: (gone) => {
+        agentsState.agents = agentsState.agents.filter((a) => a.id !== gone.id);
+        if (agentsState.openId === gone.id) agentsState.openId = null;
+        toast(`Agent „${gone.name || gone.id}“ gelöscht.`);
+        drawAgents();
+        $('tab-agents').focus();
+      },
+    });
+    return card;
+  };
+
+  panel.replaceChildren(
+    h('h3', {}, 'Agents'),
+    h('p', { class: 'panel-intro' }, 'Vorgefertigte Agenten mit Name, Beschreibung, Prompt und Assets. Sie liegen als Ordner in data/agents.'),
+    h('div', { class: 'form-actions' }, newBtn),
+    createBox,
+    importZone,
+    status,
+    agents.length
+      ? h('div', { class: 'agent-list' }, agents.map((a) => makeCard(a, a.id === openId)))
+      : h('p', { class: 'panel-intro' }, 'Noch keine Agenten vorhanden.'),
+  );
+  if (agentsState.creating && !createBox.firstChild) showCreate();
+}
+
+// --- Agent-Modelle (Provider und Modell je Agent-Art) ---
+
+const AGENT_ROLE_DEFS = [
+  { key: 'agent', label: 'Agenten', help: 'Vorgefertigte Agenten, die als Subagent oder Assistent Agent laufen. Hat Vorrang vor der Einstellung der jeweiligen Art.' },
+  { key: 'subagent', label: 'Subagenten', help: 'Vom Chat gestartete Subagenten (create_subagent).' },
+  { key: 'assistant', label: 'Assistent Agents', help: 'Von Subagenten gestartete Hilfsagenten (create_assistant_agent). Sie können keine weiteren Agenten starten.' },
+];
+
+function roleRow(def, settings) {
+  const provSel = h('select', { class: 'select', id: uid('rprov') });
+  const modelSel = h('select', { class: 'select', id: uid('rmodel') });
+  provSel.replaceChildren(
+    h('option', { value: '' }, 'Standard-Provider'),
+    ...state.providers.map((p) => h('option', { value: p.id }, `${p.name || p.id}${p.enabled === false ? ' (deaktiviert)' : ''}`)),
+  );
+  provSel.value = settings[`${def.key}_provider`] || '';
+  let seq = 0;
+  const loadModels = async (current) => {
+    const mine = ++seq;
+    const pid = provSel.value;
+    modelSel.disabled = !pid;
+    if (!pid) {
+      modelSel.replaceChildren(h('option', { value: '' }, 'Standardmodell'));
+      return;
+    }
+    modelSel.replaceChildren(h('option', { value: current || '' }, current || 'Modelle werden geladen …'));
+    const data = await fetchModels(pid);
+    if (mine !== seq) return;
+    fillModelSelect(modelSel, pid, data, current, 'Standard des Providers');
+  };
+  loadModels(settings[`${def.key}_model`] || '');
+  provSel.addEventListener('change', () => loadModels(''));
+  const fieldset = h(
+    'fieldset',
+    { class: 'role-row' },
+    h('legend', {}, def.label),
+    h('p', { class: 'field-help' }, def.help),
+    field('Provider', provSel),
+    field('Modell (optional)', modelSel),
+  );
+  return {
+    el: fieldset,
+    value: () => ({
+      [`${def.key}_provider`]: provSel.value || null,
+      [`${def.key}_model`]: provSel.value && modelSel.value && modelSel.value !== '__error' ? modelSel.value : null,
+    }),
+  };
+}
+
+function renderRolesPanel() {
+  const panel = $('panel-roles');
+  const s = state.settings;
+  const rows = AGENT_ROLE_DEFS.map((def) => roleRow(def, s));
+  const status = formStatus();
+  const form = h(
+    'form',
+    { novalidate: true },
+    h('h3', {}, 'Agent-Modelle'),
+    h(
+      'p',
+      { class: 'panel-intro' },
+      'Provider und Modell für Agenten, Subagenten und Assistent Agents. Ohne Auswahl gilt der Standard-Provider. Ein im Tool-Aufruf angegebener Provider hat immer Vorrang.',
+    ),
+    ...rows.map((r) => r.el),
+    h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'btn btn-primary' }, 'Speichern'), status),
+  );
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setFormStatus(status, 'Wird gespeichert …');
+    try {
+      const res = await api.putSettings(Object.assign({}, ...rows.map((r) => r.value())));
+      if (res && typeof res === 'object') state.settings = { ...state.settings, ...res };
+      setFormStatus(status, 'Gespeichert.');
+    } catch (err) {
+      setFormStatus(status, `Speichern fehlgeschlagen: ${err.message}`, 'error');
+    }
+  });
+  panel.replaceChildren(form);
+}
+
 // ---------- Start ----------
 
 async function init() {
@@ -1679,6 +2126,10 @@ async function init() {
   els.providerSelect.addEventListener('change', () => {
     const pid = els.providerSelect.value;
     selectProvider(pid, defaultModelFor(pid), { persist: true });
+  });
+  els.reasoningSelect.addEventListener('change', () => {
+    state.reasoning = els.reasoningSelect.value;
+    saveReasoning(state.providerId, state.reasoning);
   });
   els.modelSelect.addEventListener('change', () => {
     if (els.modelSelect.value === '__error') return;

@@ -1136,6 +1136,11 @@ class ClaudeAgentProvider(Provider):
         prompt = text if resume else build_handover_prompt(history[:-1], text)
 
         turn = _ClaudeTurn(self, req, gate, prompt, resume)
+        effort_option: dict[str, Any] = {}
+        if req.reasoning == "off":
+            effort_option["thinking"] = {"type": "disabled"}
+        elif req.reasoning in ("low", "medium", "high", "xhigh", "max"):
+            effort_option["effort"] = req.reasoning
         mcp_servers: dict[str, Any] = {}
         allowed: list[str] = []
         if req.tools is not None and len(req.tools) > 0:
@@ -1158,6 +1163,7 @@ class ClaudeAgentProvider(Provider):
             env=self._env(),
             resume=resume,
             stderr=turn.on_stderr,
+            **effort_option,
         )
         return turn
 

@@ -540,8 +540,8 @@ a {
 
 .composer-box {
   display: flex;
-  align-items: flex-end;
-  gap: var(--space-2);
+  flex-direction: column;
+  gap: var(--space-1);
   padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
   background: var(--c-surface-raised);
   border: 1px solid var(--c-border-strong);
@@ -1660,4 +1660,152 @@ fieldset {
   .error-bubble {
     border: 1px solid CanvasText;
   }
+}
+
+/* Agents */
+.dropzone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
+  padding: var(--space-4);
+  border: 2px dashed var(--c-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  color: var(--c-text-muted);
+}
+
+.dropzone p {
+  flex: 1 1 200px;
+  margin: 0;
+}
+
+.dropzone.is-over {
+  border-color: var(--c-focus);
+  background: var(--c-hover);
+}
+
+.agent-list {
+  margin-top: var(--space-4);
+}
+
+.agent-create {
+  margin: var(--space-3) 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.textarea.textarea-prompt {
+  min-height: 200px;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: var(--text-sm);
+}
+
+.provider-body h4,
+.agent-create h4 {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.asset-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.asset-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 36px;
+}
+
+.asset-list a {
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+
+.btn-small {
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
+}
+
+/* Modell- und Reasoning-Auswahl in der Eingabe */
+.composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.composer-selects {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.composer-select {
+  min-width: 0;
+  max-width: 220px;
+  height: 32px;
+  padding: 0 var(--space-6) 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  font-size: var(--text-sm);
+  color: var(--c-text-muted);
+}
+
+.composer-select:hover:not(:disabled) {
+  background-color: var(--c-hover);
+  color: var(--c-text);
+}
+
+.composer-select:focus-visible {
+  border-color: var(--c-focus);
+  color: var(--c-text);
+}
+
+.composer-select:disabled {
+  opacity: 0.55;
+}
+
+.composer-select option {
+  background: var(--c-surface-raised);
+  color: var(--c-text);
+}
+
+@media (max-width: 599.98px) {
+  .composer-select {
+    max-width: 38vw;
+    padding-right: var(--space-5);
+  }
+}
+
+/* Agent-Modelle */
+.role-row {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.role-row > legend {
+  padding: 0 var(--space-2);
+  font-weight: var(--weight-medium);
+}
+
+.role-row > .field-help {
+  margin-bottom: var(--space-3);
+}
+
+.role-row .field:last-child {
+  margin-bottom: 0;
 }

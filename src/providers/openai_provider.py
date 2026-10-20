@@ -387,7 +387,7 @@ class OpenAIProvider(Provider):
         for _round in range(MAX_ROUNDS):
             if req.cancel.is_set():
                 return
-            text, calls = self._stream_round(model, messages, tools, req.cancel, emit)
+            text, calls = self._stream_round(model, messages, tools, req.cancel, emit, req.reasoning)
             if req.cancel.is_set():
                 # Teilantwort behalten, unvollständige Tool-Aufrufe verwerfen.
                 if text:
@@ -430,11 +430,14 @@ class OpenAIProvider(Provider):
         tools: list[dict[str, Any]],
         cancel: threading.Event,
         emit: Emit,
+        reasoning: str | None = None,
     ) -> tuple[str, list[_CallBuffer]]:
         """Ein Modellaufruf mit Streaming. Liefert (Text, Tool-Aufrufe)."""
         kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if tools:
             kwargs["tools"] = tools
+        if reasoning in ("minimal", "low", "medium", "high"):
+            kwargs["reasoning_effort"] = reasoning
         try:
             stream = self._get_client().chat.completions.create(**kwargs)
         except Exception as e:

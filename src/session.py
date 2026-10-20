@@ -74,6 +74,7 @@ class Session:
         provider: Provider | None = None,
         messages: Iterable[Message] | None = None,
         state: dict[str, Any] | None = None,
+        reasoning: str | None = None,
     ):
         """`tools=None` lädt alle mit @tool registrierten Tools aus tools.py,
         `tools=[]` startet ohne Werkzeuge. Ein übergebenes ``ToolSet`` wird
@@ -87,6 +88,7 @@ class Session:
         """
         self.system_prompt = system_prompt
         self.model: str | None = model
+        self.reasoning: str | None = reasoning
         if tools is None:
             from tools import get_tools
 
@@ -180,6 +182,7 @@ class Session:
             tools=self.tools,
             cancel=cancel,
             state=self.state,
+            reasoning=self.reasoning,
         )
         events: queue.Queue[Any] = queue.Queue()
 

@@ -70,6 +70,17 @@ export const api = {
 
   listTools: () => request('GET', '/api/tools'),
 
+  listAgents: async () => asList(await request('GET', '/api/agents'), 'agents'),
+  createAgent: (data) => request('POST', '/api/agents', data),
+  // file: {filename, data (Base64)} – .md oder .zip (mit .md und Assets)
+  importAgent: (file) => request('POST', '/api/agents/import', file),
+  updateAgent: (id, data) => request('PUT', `/api/agents/${enc(id)}`, data),
+  deleteAgent: (id) => request('DELETE', `/api/agents/${enc(id)}`),
+  // files: [{name, data (Base64)}]; gleichnamige Assets werden ersetzt
+  addAgentAssets: (id, files) => request('POST', `/api/agents/${enc(id)}/assets`, { files }),
+  deleteAgentAsset: (id, name) => request('DELETE', `/api/agents/${enc(id)}/assets/${enc(name)}`),
+  agentAssetUrl: (id, name) => `/api/agents/${enc(id)}/assets/${enc(name)}`,
+
   listChats: async () => asList(await request('GET', '/api/chats'), 'chats'),
   createChat: (data) => request('POST', '/api/chats', data),
   getChat: (id) => request('GET', `/api/chats/${enc(id)}`),

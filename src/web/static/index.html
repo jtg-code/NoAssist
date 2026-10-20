@@ -65,12 +65,10 @@
         <button type="button" class="icon-btn" id="sidebar-toggle" aria-label="Seitenleiste öffnen" aria-controls="sidebar" aria-expanded="true" hidden>
           <svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg>
         </button>
-        <div class="model-picker" role="group" aria-label="Provider und Modell">
-          <span class="status-dot" id="provider-dot" role="img" aria-label="Status: unbekannt" data-state="unknown"></span>
-          <label class="visually-hidden" for="provider-select">Provider</label>
-          <select id="provider-select"></select>
-          <label class="visually-hidden" for="model-select">Modell</label>
-          <select id="model-select"></select>
+        <div class="model-picker" role="group" aria-label="Provider">
+        <span class="status-dot" id="provider-dot" role="img" aria-label="Status: unbekannt" data-state="unknown"></span>
+        <label class="visually-hidden" for="provider-select">Provider</label>
+        <select id="provider-select"></select>
         </div>
         <span class="topbar-spacer"></span>
         <button type="button" class="icon-btn" id="theme-toggle" aria-label="Darstellung: System. Klicken zum Wechseln">
@@ -88,9 +86,17 @@
           <div class="composer-box">
             <label class="visually-hidden" for="composer-input">Nachricht</label>
             <textarea id="composer-input" rows="1" placeholder="Nachricht an NoAssist" aria-describedby="composer-hint" autocomplete="off"></textarea>
-            <button type="submit" class="send-btn" id="send-btn" aria-label="Senden" disabled>
-              <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg>
-            </button>
+            <div class="composer-tools">
+              <div class="composer-selects" role="group" aria-label="Modell und Reasoning">
+                <label class="visually-hidden" for="model-select">Modell</label>
+                <select id="model-select" class="composer-select composer-select-model"></select>
+                <label class="visually-hidden" for="reasoning-select">Reasoning-Stufe</label>
+                <select id="reasoning-select" class="composer-select" title="Reasoning-Stufe"></select>
+              </div>
+              <button type="submit" class="send-btn" id="send-btn" aria-label="Senden" disabled>
+                <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg>
+              </button>
+            </div>
           </div>
           <p class="composer-hint" id="composer-hint">Enter sendet, Umschalt+Enter fügt einen Zeilenumbruch ein, Esc bricht eine laufende Antwort ab.</p>
         </form>
@@ -112,11 +118,13 @@
         <button type="button" class="tab" role="tab" id="tab-providers" aria-controls="panel-providers" aria-selected="false" tabindex="-1">Provider</button>
         <button type="button" class="tab" role="tab" id="tab-tools" aria-controls="panel-tools" aria-selected="false" tabindex="-1">Tools</button>
         <button type="button" class="tab" role="tab" id="tab-agents" aria-controls="panel-agents" aria-selected="false" tabindex="-1">Agents</button>
+        <button type="button" class="tab" role="tab" id="tab-roles" aria-controls="panel-roles" aria-selected="false" tabindex="-1">Agent-Modelle</button>
       </div>
       <section class="tabpanel" role="tabpanel" id="panel-general" aria-labelledby="tab-general" tabindex="0"></section>
       <section class="tabpanel" role="tabpanel" id="panel-providers" aria-labelledby="tab-providers" tabindex="0" hidden></section>
       <section class="tabpanel" role="tabpanel" id="panel-tools" aria-labelledby="tab-tools" tabindex="0" hidden></section>
       <section class="tabpanel" role="tabpanel" id="panel-agents" aria-labelledby="tab-agents" tabindex="0" hidden></section>
+      <section class="tabpanel" role="tabpanel" id="panel-roles" aria-labelledby="tab-roles" tabindex="0" hidden></section>
     </div>
   </dialog>
 

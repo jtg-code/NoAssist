@@ -264,6 +264,7 @@ class TurnRequest:
     tools: ToolSet
     cancel: threading.Event = field(default_factory=threading.Event)
     state: dict[str, Any] = field(default_factory=dict)  # provider-spezifischer, persistierter Chat-Zustand (veränderbar)
+    reasoning: str | None = None  # Reasoning-Stufe (z. B. "low", "high"); None = Standard des Modells
 
 
 if __name__ == "__main__":

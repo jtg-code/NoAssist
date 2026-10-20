@@ -1,7 +1,11 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable, Optional, List, Self
 from zoneinfo import ZoneInfo
 import os
+import secrets
+import threading
+import time
 import base64
 import subprocess
 import json
@@ -406,3 +410,352 @@ async def take_screenshot(filename: str = "screenshot.png") -> str:
             "message": f"Fehler beim Screenshot: {str(e)}"
         })
 
+# --- Agenten und Subagenten -----------------------------------------------------
+
+_service = None
+_subagents: dict[str, dict] = {}
+_subagents_lock = threading.RLock()
+
+from agents import ASSISTANT_EXCLUDED_TOOLS, SUBAGENT_EXCLUDED_TOOLS  # noqa: E402
+
+_KINDS = {
+    "subagent": {"prefix": "sa_", "label": "Subagent", "excluded": SUBAGENT_EXCLUDED_TOOLS},
+    "assistant": {"prefix": "aa_", "label": "Assistent Agent", "excluded": ASSISTANT_EXCLUDED_TOOLS},
+}
+"""Arten von Hilfsagenten. Der Haupt-Chat startet Subagenten, Subagenten starten Assistent Agents;
+Assistent Agents starten keine weiteren Agenten."""
+
+_ERR = "Fehler:"
+
+
+def bind_service(service) -> None:
+    """Verbindet die Agenten-Tools mit dem ChatService (wird beim Laden der Tools aufgerufen)."""
+    global _service
+    _service = service
+    _load_subagents()
+
+
+def _svc():
+    if _service is None:
+        raise RuntimeError("Der ChatService ist nicht verfügbar.")
+    return _service
+
+
+def _subagents_file() -> Path:
+    return Path(_svc().data_dir) / "subagents.json"
+
+
+def _load_subagents() -> None:
+    with _subagents_lock:
+        _subagents.clear()
+        try:
+            data = json.loads(_subagents_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict):
+            _subagents.update({k: v for k, v in data.items() if isinstance(v, dict) and v.get("chat_id")})
+
+
+def _save_subagents() -> None:
+    path = _subagents_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_subagents, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass  # nur in-memory weiter; der Subagent funktioniert bis zum Neustart
+
+
+def _agents():
+    return _svc().agents
+
+
+@tool
+def list_agents() -> list[dict]:
+    """Listet alle vorgefertigten Agenten auf.
+
+    Jeder Eintrag hat "id", "name", "description" und "assets" (Dateinamen).
+    Mit dem Namen lässt sich ein Agent in create_subagent verwenden oder mit delete_agent löschen.
+    """
+    try:
+        return [
+            {"id": a["id"], "name": a["name"], "description": a["description"],
+             "assets": [x["name"] for x in a["assets"]]}
+            for a in _agents().list()
+        ]
+    except Exception as e:
+        return [{"error": f"{_ERR} {e}"}]
+
+
+@tool
+def create_agent(
+    name: str,
+    description: str,
+    prompt: str,
+    assets: dict[str, str] | None = None,
+    asset_paths: list[str] | None = None,
+) -> str:
+    """Erstellt einen neuen vorgefertigten Agenten und bestätigt das Ergebnis.
+
+    name: eindeutiger Name des Agenten.
+    description: kurze Beschreibung, wofür der Agent gedacht ist.
+    prompt: Anweisung (System-Prompt) des Agenten.
+    assets: optional, Dateiname -> Textinhalt; wird als Asset-Datei gespeichert.
+    asset_paths: optional, Pfade vorhandener Dateien, die als Assets kopiert werden.
+    """
+    from agents import MAX_ASSET_BYTES
+
+    try:
+        store = _agents()
+        name = (name or "").strip()
+        if any(a["name"].casefold() == name.casefold() for a in store.list()):
+            return f"{_ERR} Ein Agent mit dem Namen '{name}' existiert bereits."
+        files: list[tuple[str, bytes]] = []
+        for filename, content in (assets or {}).items():
+            files.append((filename, str(content).encode("utf-8")))
+        for raw_path in asset_paths or []:
+            if not os.path.isfile(raw_path):
+                return f"{_ERR} Asset-Datei nicht gefunden: {raw_path}"
+            if os.path.getsize(raw_path) > MAX_ASSET_BYTES:
+                return f"{_ERR} Asset-Datei ist zu groß: {raw_path}"
+            with open(raw_path, "rb") as f:
+                files.append((os.path.basename(raw_path), f.read()))
+        agent = store.create({"name": name, "description": description, "prompt": prompt}, files)
+    except Exception as e:
+        return f"{_ERR} Agent konnte nicht erstellt werden: {e}"
+    return f"Agent '{agent['name']}' wurde erstellt (ID: {agent['id']}, {len(agent['assets'])} Assets)."
+
+
+@tool
+def delete_agent(name: str) -> str:
+    """Löscht einen vorgefertigten Agenten samt Assets und bestätigt das Ergebnis.
+
+    name: Name (oder ID) des Agenten, siehe list_agents.
+    """
+    try:
+        store = _agents()
+        agent = store.find(name)
+        store.delete(agent["id"])
+    except Exception as e:
+        return f"{_ERR} Agent konnte nicht gelöscht werden: {e}"
+    return f"Agent '{agent['name']}' wurde gelöscht."
+
+
+def _agent_system_prompt(agent: dict) -> str:
+    prompt = agent["prompt"]
+    if agent["assets"]:
+        folder = _agents().assets_dir(agent["id"])
+        lines = "\n".join(f"- {a['name']}" for a in agent["assets"])
+        prompt += f"\n\nZu dir gehörende Asset-Dateien (Ordner: {folder}); lies sie bei Bedarf mit read_file:\n{lines}"
+    return prompt
+
+
+def _resolve_provider(ref: str) -> dict:
+    ref = (ref or "").strip()
+    providers = _svc().list_providers()
+    found = [p for p in providers if p["id"] == ref] or [
+        p for p in providers if str(p.get("name") or "").casefold() == ref.casefold()
+    ]
+    if not found:
+        names = ", ".join(f"{p['id']} ({p.get('name')})" for p in providers) or "keine"
+        raise ValueError(f"Provider '{ref}' existiert nicht. Verfügbar: {names}.")
+    if found[0].get("enabled") is False:
+        raise ValueError(f"Provider '{found[0].get('name') or found[0]['id']}' ist deaktiviert.")
+    return found[0]
+
+
+def _create_child(kind: str, start_prompt: str, provider: str | None, model: str | None, agent: str | None) -> str:
+    cfg = _KINDS[kind]
+    try:
+        service = _svc()
+        if not (start_prompt or "").strip():
+            return f"{_ERR} Der Startprompt darf nicht leer sein."
+        agent_info = _agents().find(agent) if agent else None
+        default_provider, default_model = service.role_defaults(kind, with_agent=agent_info is not None)
+        if (provider or "").strip():
+            prov = _resolve_provider(provider)
+            # Das Modell der Einstellungen gilt nur für deren Provider
+            model = model or (default_model if prov["id"] == default_provider else None)
+        else:
+            if not default_provider:
+                return f"{_ERR} Es ist kein Provider konfiguriert."
+            prov = _resolve_provider(default_provider)
+            model = model or default_model
+        system_prompt = _agent_system_prompt(agent_info) if agent_info else None
+        sid = cfg["prefix"] + secrets.token_hex(4)
+        title = f"{cfg['label']} {sid}" + (f" ({agent_info['name']})" if agent_info else "")
+        chat = service.create_chat(provider_id=prov["id"], model=model or None, title=title)
+        try:
+            service.start_turn(
+                chat["id"], start_prompt, provider_id=prov["id"], model=model or None,
+                system_prompt=system_prompt, exclude_tools=cfg["excluded"],
+            )
+        except BaseException:
+            service.delete_chat(chat["id"])
+            raise
+        with _subagents_lock:
+            _subagents[sid] = {
+                "kind": kind, "chat_id": chat["id"], "provider_id": prov["id"], "model": model or None,
+                "system_prompt": system_prompt, "agent": agent_info["name"] if agent_info else None,
+            }
+            _save_subagents()
+    except Exception as e:
+        return f"{_ERR} {cfg['label']} konnte nicht erstellt werden: {e}"
+    return json.dumps({f"{kind}_id" if kind == "assistant" else "subagent_id": sid, "status": "gestartet"})
+
+
+@tool
+def create_subagent(
+    start_prompt: str,
+    provider: str | None = None,
+    model: str | None = None,
+    agent: str | None = None,
+) -> str:
+    """Erstellt einen Subagenten, der den Startprompt sofort im Hintergrund bearbeitet.
+
+    Gibt die Subagenten-ID zurück. Die Antwort auf den Startprompt holt
+    send_to_subagent mit leerer Nachricht und wait_for_answer=true ab.
+
+    start_prompt: erste Aufgabe/Nachricht an den Subagenten.
+    provider: ID oder Name des Providers (z.B. "lmstudio" oder "claude"); leer = Einstellung
+        "Subagenten" (bzw. "Agenten", wenn ein vorgefertigter Agent angegeben ist).
+    model: Modell des Providers; leer = Modell aus den Einstellungen bzw. Standardmodell.
+    agent: optional, Name eines vorgefertigten Agenten (dessen Prompt wird der System-Prompt).
+    Subagenten können selbst keine Subagenten erstellen, aber Assistent Agents (create_assistant_agent).
+    """
+    return _create_child("subagent", start_prompt, provider, model, agent)
+
+
+@tool
+def create_assistant_agent(
+    start_prompt: str,
+    provider: str | None = None,
+    model: str | None = None,
+    agent: str | None = None,
+) -> str:
+    """Erstellt einen Assistent Agent (Hilfsagent eines Subagenten), der den Startprompt sofort bearbeitet.
+
+    Gibt die ID des Assistent Agents zurück. Die Antwort auf den Startprompt holt
+    send_to_assistant_agent mit leerer Nachricht und wait_for_answer=true ab.
+
+    start_prompt: erste Aufgabe/Nachricht an den Assistent Agent.
+    provider: ID oder Name des Providers; leer = Einstellung "Assistent Agents"
+        (bzw. "Agenten", wenn ein vorgefertigter Agent angegeben ist).
+    model: Modell des Providers; leer = Modell aus den Einstellungen bzw. Standardmodell.
+    agent: optional, Name eines vorgefertigten Agenten (dessen Prompt wird der System-Prompt).
+    Assistent Agents können selbst keine weiteren Agenten erstellen.
+    """
+    return _create_child("assistant", start_prompt, provider, model, agent)
+
+
+def _last_answer(chat_id: str) -> str:
+    chat = _svc().get_chat(chat_id)
+    for msg in reversed((chat or {}).get("messages") or []):
+        if msg.get("role") == "assistant" and (msg.get("content") or "").strip():
+            return msg["content"]
+    return ""
+
+
+def _wait_for_turn(turn, timeout_s: float, label: str = "Subagent") -> str:
+    """Wartet auf das Ende des Turns und gibt die letzte Antwort (oder den Fehler) als Text zurück."""
+    tool_name = "send_to_assistant_agent" if label != "Subagent" else "send_to_subagent"
+    deadline = time.monotonic() + timeout_s
+    seq, answer, error, status = 0, "", None, None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return (f"{_ERR} Zeitüberschreitung nach {int(timeout_s)} s: {label} arbeitet noch. "
+                    f"Mit {tool_name} (leere Nachricht, wait_for_answer=true) erneut warten.")
+        events, finished = turn.events_after(seq, min(remaining, 5.0))
+        for seq, ev in events:
+            kind = ev.get("type")
+            if kind == "message":
+                msg = ev.get("message") or {}
+                if msg.get("role") == "assistant" and (msg.get("content") or "").strip():
+                    answer = msg["content"]
+            elif kind == "error":
+                error = ev.get("message") or "Unbekannter Fehler"
+            elif kind == "done":
+                status = ev.get("status")
+        if finished:
+            break
+    if error:
+        return f"{_ERR} {label} meldet einen Fehler: {error}"
+    if status == "cancelled":
+        return f"{_ERR} Die Antwort wurde abgebrochen ({label})."
+    return answer or f"({label} hat keine Textantwort geliefert.)"
+
+
+def _send_child(kind: str, child_id: str, message: str, wait_for_answer: bool, timeout_s: int) -> str:
+    cfg = _KINDS[kind]
+    label = cfg["label"]
+    try:
+        service = _svc()
+        with _subagents_lock:
+            info = dict(_subagents.get(child_id) or {})
+        if not info or info.get("kind", "subagent") != kind:
+            return f"{_ERR} Unbekannter {label}: {child_id}"
+        chat_id = info["chat_id"]
+        timeout = float(max(1, min(int(timeout_s), 3600)))
+        running = service.active_turn(chat_id)
+        if not (message or "").strip():
+            if not wait_for_answer:
+                return f"{_ERR} Nachricht fehlt (leer nur zusammen mit wait_for_answer=true)."
+            if running is not None:
+                return _wait_for_turn(running, timeout, label)
+            return _last_answer(chat_id) or "(Noch keine Antwort vorhanden.)"
+        if running is not None:
+            return (f"{_ERR} {label} bearbeitet noch eine Aufgabe. Erst mit leerer Nachricht und "
+                    "wait_for_answer=true auf die Antwort warten.")
+        turn, _ = service.start_turn(
+            chat_id, message, provider_id=info["provider_id"], model=info.get("model"),
+            system_prompt=info.get("system_prompt"), exclude_tools=cfg["excluded"],
+        )
+        if not wait_for_answer:
+            return f"Nachricht an {label} {child_id} gesendet; er arbeitet im Hintergrund."
+        return _wait_for_turn(turn, timeout, label)
+    except Exception as e:
+        return f"{_ERR} {e}"
+
+
+@tool
+def send_to_subagent(
+    subagent_id: str,
+    message: str = "",
+    wait_for_answer: bool = True,
+    timeout_s: int = 300,
+) -> str:
+    """Sendet eine Nachricht an einen Subagenten.
+
+    wait_for_answer=true: wartet auf die Antwort und gibt sie zurück.
+    wait_for_answer=false: gibt nur die Bestätigung zurück, der Subagent arbeitet im Hintergrund.
+    Läuft noch eine frühere Aufgabe (z.B. der Startprompt), holt eine leere Nachricht mit
+    wait_for_answer=true deren Antwort ab; ohne laufende Aufgabe liefert sie die letzte Antwort.
+
+    subagent_id: ID aus create_subagent.
+    message: Nachricht an den Subagenten.
+    timeout_s: längste Wartezeit in Sekunden bei wait_for_answer=true.
+    """
+    return _send_child("subagent", subagent_id, message, wait_for_answer, timeout_s)
+
+
+@tool
+def send_to_assistant_agent(
+    assistant_id: str,
+    message: str = "",
+    wait_for_answer: bool = True,
+    timeout_s: int = 300,
+) -> str:
+    """Sendet eine Nachricht an einen Assistent Agent.
+
+    wait_for_answer=true: wartet auf die Antwort und gibt sie zurück.
+    wait_for_answer=false: gibt nur die Bestätigung zurück, der Assistent Agent arbeitet im Hintergrund.
+    Läuft noch eine frühere Aufgabe (z.B. der Startprompt), holt eine leere Nachricht mit
+    wait_for_answer=true deren Antwort ab; ohne laufende Aufgabe liefert sie die letzte Antwort.
+
+    assistant_id: ID aus create_assistant_agent.
+    message: Nachricht an den Assistent Agent.
+    timeout_s: längste Wartezeit in Sekunden bei wait_for_answer=true.
+    """
+    return _send_child("assistant", assistant_id, message, wait_for_answer, timeout_s)

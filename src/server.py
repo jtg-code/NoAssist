@@ -34,6 +34,8 @@ Fake-ChatService (ohne Provider) auf http://127.0.0.1:8765/.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import dataclasses
 import json
 import logging
@@ -48,9 +50,11 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, request, send_from_directory
+from flask import Flask, Response, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 from werkzeug.serving import make_server
+
+from agents import AgentStore
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -441,6 +445,65 @@ def create_app(service: Any, *, port: int, dev: bool, boot_id: str) -> Flask:
             data = {**data, "mcp_servers": [redact_fields(s, "error") for s in data["mcp_servers"]]}
         return ok(data)
 
+    # -- Agenten --
+
+    agents_dir = Path(getattr(service, "data_dir", None) or DEFAULT_DATA_DIR) / "agents"
+    agent_store = getattr(service, "agents", None) or AgentStore(agents_dir)
+    app.extensions["noassist"]["agents"] = agent_store
+
+    def decode_file(entry: Any, name_key: str = "name") -> tuple[str, bytes]:
+        """Datei aus ``{"name", "data": <base64>}``; Uploads laufen als JSON (siehe Content-Type-Regel)."""
+        if not isinstance(entry, dict) or not isinstance(entry.get(name_key), str) or not isinstance(entry.get("data"), str):
+            raise ApiError(400, "bad_request", f"Datei muss die Felder '{name_key}' und 'data' (Base64) enthalten.")
+        try:
+            return entry[name_key], base64.b64decode(entry["data"], validate=True)
+        except (ValueError, binascii.Error):
+            raise ApiError(400, "bad_request", "Die Dateidaten sind kein gültiges Base64.") from None
+
+    @app.get("/api/agents")
+    def list_agents() -> Response:
+        return ok(call(agent_store.list))
+
+    @app.post("/api/agents")
+    def create_agent() -> Response:
+        return ok(call(agent_store.create, body()), 201)
+
+    @app.post("/api/agents/import")
+    def import_agent() -> Response:
+        filename, raw = decode_file(body(), "filename")
+        return ok(call(agent_store.import_file, filename, raw), 201)
+
+    @app.get("/api/agents/<agent_id>")
+    def get_agent(agent_id: str) -> Response:
+        return ok(call(agent_store.get, agent_id))
+
+    @app.put("/api/agents/<agent_id>")
+    def update_agent(agent_id: str) -> Response:
+        return ok(call(agent_store.update, agent_id, body()))
+
+    @app.delete("/api/agents/<agent_id>")
+    def delete_agent(agent_id: str) -> Response:
+        body()
+        call(agent_store.delete, agent_id)
+        return no_content()
+
+    @app.post("/api/agents/<agent_id>/assets")
+    def add_agent_assets(agent_id: str) -> Response:
+        files = body().get("files")
+        if not isinstance(files, list) or not files:
+            raise ApiError(400, "bad_request", "Feld 'files' muss eine nicht leere Liste sein.")
+        return ok(call(agent_store.add_assets, agent_id, [decode_file(f) for f in files]))
+
+    @app.get("/api/agents/<agent_id>/assets/<name>")
+    def download_agent_asset(agent_id: str, name: str) -> Response:
+        path = call(agent_store.asset_path, agent_id, name)
+        return send_file(path, as_attachment=True, download_name=path.name, max_age=0)
+
+    @app.delete("/api/agents/<agent_id>/assets/<name>")
+    def delete_agent_asset(agent_id: str, name: str) -> Response:
+        body()
+        return ok(call(agent_store.delete_asset, agent_id, name))
+
     # -- Chats --
 
     def chat_out(chat: Any) -> dict[str, Any]:
@@ -510,7 +573,7 @@ def create_app(service: Any, *, port: int, dev: bool, boot_id: str) -> Flask:
         if not retry and not content.strip():
             raise ApiError(400, "bad_request", "Die Nachricht ist leer.")
         kwargs: dict[str, Any] = {"provider_id": opt_str(data, "provider_id"), "model": opt_str(data, "model"),
-                                  "retry": retry}
+                                  "retry": retry, "reasoning": opt_str(data, "reasoning")}
         if retry:  # ohne retry wird user_message_id ignoriert
             user_message_id = opt_str(data, "user_message_id")
             if not user_message_id or not user_message_id.strip():

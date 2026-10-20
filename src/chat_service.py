@@ -63,13 +63,14 @@ import secrets
 import threading
 import time
 import uuid
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
+from agents import MAIN_EXCLUDED_TOOLS, AgentStore
 from chat_types import (
     INTERNAL,
     Event,
@@ -115,6 +116,9 @@ MAX_ID_CHARS = 200
 # MIN_SECRET_LEN (aus storage): kürzere Keys/env-Werte werden nie geschwärzt (z. B. "ollama", "1").
 
 THEMES = ("system", "light", "dark")
+REASONING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+AGENT_ROLES = ("agent", "subagent", "assistant")
+"""Rollen mit eigenem Standard-Provider/-Modell (Einstellungen ``<rolle>_provider`` und ``<rolle>_model``)."""
 AUTH_MODES = ("login", "api_key")
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -254,6 +258,8 @@ class _TurnContext:
     system_prompt: str
     state: dict[str, Any]
     user: Message
+    exclude_tools: frozenset[str] = frozenset()
+    reasoning: str | None = None
 
 
 @dataclass(eq=False)
@@ -564,6 +570,7 @@ class ChatService:
         self.store = store
         self.config = config
         self.data_dir = Path(data_dir)
+        self.agents = AgentStore(self.data_dir / "agents")
         self._provider_factory = provider_factory or _default_factory
 
         self._lock = threading.RLock()  # Turns, aktive Turns, Zustand des Service
@@ -765,6 +772,23 @@ class ChatService:
             if p.get("enabled", True) is not False:
                 return p["id"]
         return providers[0]["id"] if providers else None
+
+    def role_defaults(self, role: str, with_agent: bool = False) -> tuple[str | None, str | None]:
+        """Provider und Modell für ``role`` (``subagent`` oder ``assistant``) laut Einstellungen.
+
+        Mit ``with_agent`` (ein vorgefertigter Agent wird verwendet) gilt zuerst die Rolle ``agent``.
+        Ist keine Rolle (mit aktiviertem Provider) eingestellt, kommt der Standard-Provider ohne Modell zurück.
+        """
+        if role not in AGENT_ROLES:
+            raise ValueError(f"Unbekannte Rolle: {role!r}")
+        self._sync_config()
+        with self._cfg_lock:
+            settings = self._settings()
+            for name in (("agent", role) if with_agent else (role,)):
+                cfg = self._provider_cfg(settings.get(f"{name}_provider") or "")
+                if cfg is not None and cfg.get("enabled", True) is not False:
+                    return cfg["id"], settings.get(f"{name}_model") or None
+            return self._default_provider_id(), None
 
     def _disabled_tools(self) -> set[str]:
         with self._cfg_lock:
@@ -1030,6 +1054,10 @@ class ChatService:
             if settings.get("default_provider") == pid:
                 settings["default_provider"] = self._default_provider_id()
                 settings["default_model"] = None
+            for role in AGENT_ROLES:
+                if settings.get(f"{role}_provider") == pid:
+                    settings[f"{role}_provider"] = None
+                    settings[f"{role}_model"] = None
             try:
                 self._save_config()
             except BaseException:
@@ -1113,6 +1141,9 @@ class ChatService:
             changes["system_prompt"] = prompt
         if "default_model" in data:
             changes["default_model"] = _v_str("default_model", data["default_model"])
+        for role in AGENT_ROLES:
+            if f"{role}_model" in data:
+                changes[f"{role}_model"] = _v_str(f"{role}_model", data[f"{role}_model"])
         with self._cfg_lock:
             self._sync_config(strict=True)
             if "default_provider" in data:
@@ -1121,6 +1152,15 @@ class ChatService:
                     raise ValueError(f"Provider {pid!r} existiert nicht.")
                 changes["default_provider"] = pid
             settings = self._settings()
+            for role in AGENT_ROLES:
+                key = f"{role}_provider"
+                if key in data:
+                    pid = _v_str(key, data[key], max_len=200)
+                    if pid is not None and self._provider_cfg(pid) is None:
+                        raise ValueError(f"Provider {pid!r} existiert nicht.")
+                    changes[key] = pid
+                if changes.get(key, settings.get(key)) is None:
+                    changes[f"{role}_model"] = None  # ein Modell gehört immer zu einem Provider
             if changes:
                 old = dict(settings)
                 settings.update(changes)
@@ -1138,9 +1178,10 @@ class ChatService:
         with self._mcp_lock:
             if self._local_specs is None:
                 try:
-                    from tools import get_tools
+                    from tools import bind_service, get_tools
                     from toolset import ToolSet
 
+                    bind_service(self)
                     self._local_specs = list(ToolSet.from_any(get_tools()))
                 except Exception:
                     log.exception("Lokale Tools konnten nicht geladen werden")
@@ -1377,6 +1418,9 @@ class ChatService:
         model: str | None = None,
         retry: bool = False,
         user_message_id: str | None = None,
+        system_prompt: str | None = None,
+        exclude_tools: Iterable[str] | None = None,
+        reasoning: str | None = None,
     ) -> tuple[Turn, Message]:
         """Speichert die User-Nachricht und startet den Turn im Hintergrund.
 
@@ -1389,6 +1433,12 @@ class ChatService:
           gelöscht. Nur erlaubt, wenn sie die letzte User-Nachricht ist und zu
           ihr keine fertige Antwort vorliegt (siehe Modul-Doku).
 
+        ``system_prompt`` ersetzt für diesen Turn den System-Prompt der Einstellungen;
+        ``exclude_tools`` nimmt Tools (nach Name) aus diesem Turn heraus; ``None`` = Standard
+        des Haupt-Chats (``agents.MAIN_EXCLUDED_TOOLS``).
+        ``reasoning`` ist die Reasoning-Stufe (``REASONING_LEVELS``); ``None`` = Standard des Modells.
+        Provider ohne Unterstützung ignorieren sie.
+
         Gibt ``(Turn, User-Nachricht)`` zurück. Wirft ``NotFound`` (Chat fehlt),
         ``Busy`` (Turn läuft schon), ``RetryStale`` (Wiederholung passt nicht
         mehr) und ``ValueError`` (leere Nachricht, fehlende ``user_message_id``,
@@ -1398,6 +1448,15 @@ class ChatService:
             raise ServiceClosed("Der ChatService wurde bereits beendet.")
         provider_id = _v_str("provider_id", provider_id, max_len=MAX_ID_CHARS)
         model = _v_str("model", model)
+        if system_prompt is not None:
+            if not isinstance(system_prompt, str):
+                raise ValueError("Feld 'system_prompt' muss ein String sein.")
+            if len(system_prompt) > MAX_SYSTEM_PROMPT_CHARS:
+                raise ValueError(f"Der System-Prompt ist zu lang (höchstens {MAX_SYSTEM_PROMPT_CHARS} Zeichen).")
+        excluded = frozenset(MAIN_EXCLUDED_TOOLS if exclude_tools is None else exclude_tools)
+        reasoning = _v_str("reasoning", reasoning, max_len=20)
+        if reasoning is not None and reasoning not in REASONING_LEVELS:
+            raise ValueError(f"Feld 'reasoning' muss einer der Werte {', '.join(REASONING_LEVELS)} sein.")
         if retry:
             user_message_id = _v_str("user_message_id", user_message_id, max_len=MAX_ID_CHARS)
             if user_message_id is None:
@@ -1452,9 +1511,10 @@ class ChatService:
                 chosen = None  # Providerwechsel ohne Modellangabe: Standard des neuen Providers
             default = settings.get("default_model") if pid == settings.get("default_provider") else None
             effective = chosen or default or cfg.get("default_model") or None
-            system_prompt = settings.get("system_prompt") or ""
-            if not isinstance(system_prompt, str):
-                system_prompt = ""
+            if system_prompt is None:
+                system_prompt = settings.get("system_prompt") or ""
+                if not isinstance(system_prompt, str):
+                    system_prompt = ""
 
             slot = self._acquire_provider(pid, cfg)
             if retry:
@@ -1485,13 +1545,19 @@ class ChatService:
             raise
 
         turn.provider_id, turn.model = pid, effective
-        ctx = _TurnContext(slot, pid, effective, system_prompt, state, user)
+        ctx = _TurnContext(slot, pid, effective, system_prompt, state, user, excluded, reasoning)
         thread = threading.Thread(
             target=self._run_turn, args=(turn, ctx), name=f"chat-turn-{turn.id[-8:]}", daemon=True
         )
         turn._thread = thread
         thread.start()
         return turn, user
+
+    def active_turn(self, chat_id: str) -> Turn | None:
+        """Laufender Turn des Chats oder ``None``."""
+        with self._lock:
+            turn = self._active.get(chat_id)
+            return turn if turn is not None and not turn.finished else None
 
     def get_turn(self, turn_id: str) -> Turn | None:
         """Laufender oder vor höchstens 5 Minuten beendeter Turn, sonst ``None``."""
@@ -1602,13 +1668,17 @@ class ChatService:
 
         try:
             history = self._history_before(turn.chat_id, ctx.user.id)
+            tools = self._turn_tools()
+            for name in ctx.exclude_tools:
+                tools.remove(name)
             session = Session(
                 system_prompt=ctx.system_prompt,
                 model=ctx.model,
-                tools=self._turn_tools(),
+                tools=tools,
                 provider=ctx.slot.provider,
                 messages=history,
                 state=ctx.state,
+                reasoning=ctx.reasoning,
             )
             for ev in session.stream(ctx.user, cancel=turn.cancel):
                 kind = ev.get("type")
