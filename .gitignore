@@ -9,7 +9,7 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
-
+.*/
 # Virtuelle Umgebungen
 .venv/
 venv/
@@ -29,3 +29,7 @@ desktop.ini
 # Claude Code
 .claude/settings.local.json
 graphify-out/
+
+# NoAssist-Laufzeitdaten (Konfiguration mit API-Keys, Chat-Datenbank)
+data/
+*.db
