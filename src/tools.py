@@ -406,17 +406,3 @@ async def take_screenshot(filename: str = "screenshot.png") -> str:
             "message": f"Fehler beim Screenshot: {str(e)}"
         })
 
-
-
-
-if __name__ == "__main__":
-    print("Verfügbare Tools:")
-    for name, func in _registry.items():
-        print(f"- {name}: {(func.__doc__ or '').splitlines()[0]}")
-    print("\nBeispielaufrufe:")
-    # create workspace
-    print(create_workspace("test_workspace"))
-    # list workspaces
-    print(list_workspaces())
-    # delete workspace
-    #print(delete_workspace("test_workspace"))

@@ -1,14 +1,14 @@
-lmstudio
-mcp
-tzdata
-ddgs
-trafilatura
+lmstudio>=1.5.0
+mcp>=2.3.0
+tzdata>=2026.5
+ddgs>=9.16.0
+trafilatura>=2.3.1
 flask>=3.1
 pywebview>=6.2
 claude-agent-sdk>=0.2.168
 openai>=3.35
 watchfiles>=1.3
 pydantic>=2
-msgspec
+msgspec>=0.22.0
 pywin32; sys_platform == "win32"
-playwright
+playwright>=1.64.0
