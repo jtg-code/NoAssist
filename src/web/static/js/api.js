@@ -69,6 +69,11 @@ export const api = {
   claudeLogin: () => request('POST', '/api/providers/claude/login', {}),
 
   listTools: () => request('GET', '/api/tools'),
+  // Browser eines Chats: {active, visible, url}; showBrowser öffnet ihn als Fenster (visible=false versteckt ihn)
+  browserState: (chatId) => request('GET', `/api/chats/${enc(chatId)}/browser`),
+  showBrowser: (chatId, visible = true) => request('POST', `/api/chats/${enc(chatId)}/browser/show`, { visible }),
+  // Subagenten des Chats chatId (bzw. der Assistent Agents, wenn chatId selbst ein Subagent ist)
+  listSubagents: async (chatId) => asList(await request('GET', `/api/subagents?chat_id=${enc(chatId || '')}`), 'subagents'),
 
   listAgents: async () => asList(await request('GET', '/api/agents'), 'agents'),
   createAgent: (data) => request('POST', '/api/agents', data),
@@ -97,7 +102,7 @@ export const api = {
 
 /** Alle Event-Typen eines Turns (SSE "event:"-Feld). */
 export const TURN_EVENTS = [
-  'turn_start', 'delta', 'reasoning', 'status', 'tool_call', 'tool_result', 'message', 'error', 'done',
+  'turn_start', 'delta', 'reasoning', 'status', 'tool_call', 'tool_output', 'tool_result', 'message', 'error', 'done',
 ];
 
 /**

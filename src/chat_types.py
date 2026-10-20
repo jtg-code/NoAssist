@@ -201,6 +201,11 @@ def ev_tool_result(
     }
 
 
+def ev_tool_output(call_id: str, name: str, text: str, stream: str = "stdout") -> Event:
+    """Ein Stück Live-Ausgabe eines laufenden Tools (z. B. ``stdout``/``stderr`` eines Befehls)."""
+    return {"type": "tool_output", "call_id": call_id, "name": name, "text": text, "stream": stream}
+
+
 def ev_message(msg: Message) -> Event:
     """Eine fertige Nachricht; ``message`` ist ``msg.to_dict()`` (JSON-tauglich).
 

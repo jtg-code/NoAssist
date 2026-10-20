@@ -232,9 +232,32 @@ export class ToolCard {
     this.argsPre.textContent = formatArgs(args) || '{}';
   }
 
+  /** Live-Ausgabe eines laufenden Tools anhängen; die Karte klappt beim ersten Stück auf. */
+  appendOutput(text, stream) {
+    if (this.state !== 'running' || !text) return;
+    if (!this.live) {
+      this.live = true;
+      this.liveText = '';
+      this.resultHead.hidden = false;
+      this.resultPre.hidden = false;
+      this.resultHead.textContent = 'Ausgabe (live)';
+      this.el.open = true;
+    }
+    this.liveText += text;
+    // Nur das Ende halten: ein Dauerläufer soll den Browser nicht füllen
+    if (this.liveText.length > 200_000) this.liveText = this.liveText.slice(-150_000);
+    const pre = this.resultPre;
+    const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+    pre.textContent = this.liveText;
+    pre.dataset.stream = stream === 'stderr' ? 'stderr' : 'stdout';
+    if (atEnd) pre.scrollTop = pre.scrollHeight;
+  }
+
   /** Ergebnis immer als Text (nie als HTML) anzeigen. */
   setResult({ result, isError, truncated, durationMs }) {
     this.resultHead.hidden = false;
+    this.resultHead.textContent = 'Ergebnis';
+    this.live = false;
     this.resultPre.hidden = false;
     this.resultPre.textContent = typeof result === 'string' ? result : formatArgs(result);
     if (truncated) {
@@ -476,6 +499,13 @@ export class LiveTurnView {
       card.setArgs(d.arguments);
     }
     this._updateIndicator();
+    this.onChange();
+  }
+
+  toolOutput(d) {
+    const card = this.cards.get(d.call_id);
+    if (!card) return;
+    card.appendOutput(d.text, d.stream);
     this.onChange();
   }
 

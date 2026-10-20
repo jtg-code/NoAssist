@@ -504,6 +504,36 @@ def create_app(service: Any, *, port: int, dev: bool, boot_id: str) -> Flask:
         body()
         return ok(call(agent_store.delete_asset, agent_id, name))
 
+    @app.get("/api/subagents")
+    def list_subagents() -> Response:
+        from tools import subagent_tree
+
+        return ok(call(subagent_tree, service, request.args.get("chat_id")))
+
+    # -- Browser der Agenten --
+
+    @app.get("/api/chats/<chat_id>/browser")
+    def browser_state(chat_id: str) -> Response:
+        from browser import manager
+
+        return ok(manager.state(chat_id))
+
+    @app.post("/api/chats/<chat_id>/browser/show")
+    def browser_show(chat_id: str) -> Response:
+        """Öffnet den Browser des Chats als sichtbares Fenster (``{"visible": false}`` versteckt ihn wieder)."""
+        from browser import NoBrowser, manager
+
+        data = body()
+        visible = data.get("visible", True)
+        if not isinstance(visible, bool):
+            raise ApiError(400, "bad_request", "Feld 'visible' muss true oder false sein.")
+        try:
+            return ok(manager.show(chat_id, visible))
+        except NoBrowser as exc:
+            raise ApiError(404, "no_browser", str(exc)) from None
+        except Exception as exc:
+            raise ApiError(500, "browser_failed", f"Der Browser konnte nicht umgeschaltet werden: {exc}") from None
+
     # -- Chats --
 
     def chat_out(chat: Any) -> dict[str, Any]:
@@ -516,7 +546,10 @@ def create_app(service: Any, *, port: int, dev: bool, boot_id: str) -> Flask:
 
     @app.get("/api/chats")
     def list_chats() -> Response:
-        return ok([chat_out(c) for c in call(service.list_chats) or []])
+        from tools import subagent_chat_ids
+
+        hidden = subagent_chat_ids(service)
+        return ok([chat_out(c) for c in call(service.list_chats) or [] if c.get("id") not in hidden])
 
     @app.post("/api/chats")
     def create_chat() -> Response:

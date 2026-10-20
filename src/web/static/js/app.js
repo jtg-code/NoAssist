@@ -13,6 +13,11 @@ const els = {
   sidebar: $('sidebar'),
   sidebarClose: $('sidebar-close'),
   sidebarToggle: $('sidebar-toggle'),
+  agentsSidebar: $('agents-sidebar'),
+  agentsToggle: $('agents-toggle'),
+  browserToggle: $('browser-toggle'),
+  agentsClose: $('agents-close'),
+  agentsList: $('agents-list'),
   backdrop: $('backdrop'),
   newChat: $('new-chat'),
   chatList: $('chat-list'),
@@ -58,7 +63,7 @@ const state = {
   modelSeq: 0,
 };
 
-const STORAGE = { theme: 'noassist.theme', draft: 'noassist.draft', sidebar: 'noassist.sidebar', reasoning: 'noassist.reasoning' };
+const STORAGE = { theme: 'noassist.theme', draft: 'noassist.draft', sidebar: 'noassist.sidebar', agents: 'noassist.agents', agentsOpen: 'noassist.agents-open', reasoning: 'noassist.reasoning' };
 const narrowMq = window.matchMedia('(max-width: 799.98px)');
 
 // ---------- kleine Helfer ----------
@@ -170,11 +175,265 @@ function initSidebar() {
   });
   els.sidebarToggle.addEventListener('click', () => setSidebar(true, { focus: true }));
   els.sidebarClose.addEventListener('click', () => setSidebar(false, { focus: true }));
-  els.backdrop.addEventListener('click', () => setSidebar(false, { focus: true }));
+  els.backdrop.addEventListener('click', () => {
+    if (els.app.dataset.sidebar === 'open') setSidebar(false, { focus: true });
+    if (els.app.dataset.agents === 'open') setAgentsSidebar(false, { focus: true });
+  });
 }
 
 function closeSidebarIfNarrow() {
   if (narrowMq.matches && els.app.dataset.sidebar === 'open') setSidebar(false);
+}
+
+// ---------- Browser-Fenster (Knopf neben der Agenten-Leiste) ----------
+
+const BROWSER_TOOLS = new Set([
+  'navigate', 'get_page_content', 'click_element', 'type_text', 'press_key', 'scroll', 'hover_element',
+  'select_option', 'set_checkbox', 'upload_file', 'drag_and_drop', 'click_at', 'wait_for', 'go_back',
+  'go_forward', 'reload_page', 'list_tabs', 'switch_tab', 'new_tab', 'close_tab', 'take_screenshot', 'close_browser',
+]);
+const browserView = { active: false, visible: false, seq: 0, busy: false };
+
+function renderBrowserButton() {
+  const btn = els.browserToggle;
+  btn.hidden = !browserView.active;
+  btn.setAttribute('aria-pressed', String(browserView.visible));
+  const text = browserView.visible ? 'Browser-Fenster ausblenden' : 'Browser als Fenster öffnen';
+  btn.setAttribute('aria-label', text);
+  btn.title = text;
+  btn.disabled = browserView.busy;
+}
+
+/** Fragt ab, ob der aktuelle Chat einen Browser hat (startet keinen). */
+async function refreshBrowser() {
+  const chatId = state.chatId;
+  const seq = ++browserView.seq;
+  let info = { active: false, visible: false };
+  if (chatId) {
+    try {
+      info = await api.browserState(chatId);
+    } catch {
+      /* Server nicht erreichbar – Knopf bleibt wie er war */
+      if (seq === browserView.seq) return;
+    }
+  }
+  if (seq !== browserView.seq || chatId !== state.chatId) return;
+  browserView.active = !!info.active;
+  browserView.visible = !!info.visible;
+  renderBrowserButton();
+}
+
+/** Browser eines Chats als Fenster öffnen bzw. verstecken. */
+async function toggleBrowser(chatId, visible) {
+  try {
+    const info = await api.showBrowser(chatId, visible);
+    if (visible && info.visible) announce('Browser-Fenster geöffnet.');
+  } catch (e) {
+    toast(e.code === 'no_browser' ? 'Für diesen Agenten läuft kein Browser.' : `Browser konnte nicht umgeschaltet werden: ${e.message}`, 'error');
+  }
+}
+
+function initBrowserButton() {
+  els.browserToggle.addEventListener('click', async () => {
+    const chatId = state.chatId;
+    if (!chatId || browserView.busy) return;
+    browserView.busy = true;
+    renderBrowserButton();
+    await toggleBrowser(chatId, !browserView.visible);
+    browserView.busy = false;
+    await refreshBrowser();
+    renderBrowserButton();
+    if (els.app.dataset.agents === 'open') refreshSubagents();
+  });
+  // Läuft der Browser, bemerkt der Knopf es auch ohne Tool-Ereignis (z. B. Fenster vom Nutzer geschlossen)
+  setInterval(() => {
+    if (!document.hidden && state.chatId) refreshBrowser();
+  }, 4000);
+}
+
+// ---------- Subagenten-Leiste (rechts) ----------
+
+const subagentsView = { items: [], open: new Set(), loaded: false, error: null, timer: 0 };
+
+function setAgentsSidebar(open, { focus = false } = {}) {
+  const narrow = narrowMq.matches;
+  els.app.dataset.agents = open ? 'open' : 'closed';
+  els.agentsSidebar.inert = !open;
+  els.agentsToggle.setAttribute('aria-expanded', String(open));
+  els.agentsToggle.setAttribute('aria-label', open ? 'Agenten-Leiste schließen' : 'Agenten-Leiste öffnen');
+  if (!narrow) store(STORAGE.agentsOpen, open ? 'open' : 'closed');
+  // Unter 800 px ist die geöffnete Leiste modal; die linke Leiste ist dann zu
+  if (narrow) els.main.inert = open || els.app.dataset.sidebar === 'open';
+  if (open) {
+    if (narrow && els.app.dataset.sidebar === 'open') setSidebar(false);
+    refreshSubagents();
+    startSubagentPolling();
+  } else {
+    stopSubagentPolling();
+  }
+  if (focus) (open ? els.agentsClose : els.agentsToggle).focus();
+}
+
+function startSubagentPolling() {
+  stopSubagentPolling();
+  subagentsView.timer = setInterval(() => {
+    if (!document.hidden) refreshSubagents();
+  }, 4000);
+}
+
+function stopSubagentPolling() {
+  clearInterval(subagentsView.timer);
+  subagentsView.timer = 0;
+}
+
+async function refreshSubagents() {
+  const chatId = state.chatId;
+  let items = [];
+  let error = null;
+  if (chatId) {
+    try {
+      items = await api.listSubagents(chatId);
+    } catch (e) {
+      error = e.message;
+    }
+  }
+  if (chatId !== state.chatId) return; // Chat wurde inzwischen gewechselt
+  subagentsView.items = items;
+  subagentsView.error = error;
+  subagentsView.loaded = true;
+  renderSubagents();
+}
+
+/** Nach einem Chatwechsel: Leiste leeren und für den neuen Chat laden. */
+function resetSubagents() {
+  subagentsView.items = [];
+  subagentsView.error = null;
+  subagentsView.loaded = !state.chatId;
+  subagentsView.open.clear();
+  renderSubagents();
+  browserView.active = false;
+  browserView.visible = false;
+  renderBrowserButton();
+  refreshBrowser();
+  if (state.chatId && els.app.dataset.agents === 'open') refreshSubagents();
+}
+
+function agentOpenLink(item, label) {
+  const link = h(
+    'a',
+    {
+      class: 'icon-btn small',
+      href: `#chat=${encodeURIComponent(item.chat_id)}`,
+      'aria-label': `Chat von ${label} öffnen`,
+      title: 'Chat öffnen',
+    },
+    icon('open'),
+  );
+  link.addEventListener('click', closeSidebarIfNarrow);
+  link.addEventListener('click', () => {
+    if (narrowMq.matches) setAgentsSidebar(false);
+  });
+  return link;
+}
+
+function agentBrowserButton(item, label) {
+  if (!item.browser?.active) return null;
+  const visible = !!item.browser.visible;
+  const text = visible ? `Browser von ${label} ausblenden` : `Browser von ${label} als Fenster öffnen`;
+  const btn = h(
+    'button',
+    { type: 'button', class: 'icon-btn small', 'aria-label': text, 'aria-pressed': String(visible), title: text, dataset: { role: 'browser' } },
+    icon('browser'),
+  );
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    await toggleBrowser(item.chat_id, !visible);
+    await refreshSubagents();
+    if (item.chat_id === state.chatId) refreshBrowser();
+  });
+  return btn;
+}
+
+function agentMeta(item) {
+  const provider = providerById(item.provider_id)?.name || item.provider_id || '';
+  return [item.agent, [provider, item.model].filter(Boolean).join(' · ')].filter(Boolean).join(' – ');
+}
+
+function agentRow(item, { child = false } = {}) {
+  const label = item.agent ? `${item.agent} (${item.id})` : item.id;
+  const dot = item.running ? h('span', { class: 'status-dot', role: 'img', 'aria-label': 'arbeitet', title: 'arbeitet', dataset: { state: 'checking' } }) : null;
+  const active = item.chat_id === state.chatId;
+  const text = h('span', { class: 'agent-text' }, h('span', { class: 'agent-name' }, label), h('span', { class: 'field-help' }, agentMeta(item)));
+  const open = agentOpenLink(item, label);
+  const browserBtn = agentBrowserButton(item, label);
+
+  if (child) {
+    return h('li', { class: `agent-item agent-child${active ? ' is-active' : ''}`, dataset: { id: item.id } }, h('div', { class: 'agent-row' }, dot, text, browserBtn, open));
+  }
+  const isOpen = subagentsView.open.has(item.id);
+  const count = item.children.length;
+  const bodyId = `agent-body-${item.id}`;
+  const toggle = h(
+    'button',
+    { type: 'button', class: 'agent-toggle', 'aria-expanded': String(isOpen), 'aria-controls': bodyId, dataset: { role: 'toggle' } },
+    icon('chevron', 'agent-chevron'),
+    dot,
+    text,
+    h('span', { class: 'badge', title: 'Assistent Agents' }, String(count)),
+  );
+  const body = h(
+    'ul',
+    { class: 'agent-children', id: bodyId, 'aria-label': `Assistent Agents von ${label}` },
+    count ? item.children.map((c) => agentRow(c, { child: true })) : h('li', { class: 'field-help agent-none' }, 'Keine Assistent Agents.'),
+  );
+  body.hidden = !isOpen;
+  toggle.addEventListener('click', () => {
+    const next = !subagentsView.open.has(item.id);
+    if (next) subagentsView.open.add(item.id);
+    else subagentsView.open.delete(item.id);
+    toggle.setAttribute('aria-expanded', String(next));
+    body.hidden = !next;
+  });
+  return h(
+    'li',
+    { class: `agent-item${active ? ' is-active' : ''}`, dataset: { id: item.id } },
+    h('div', { class: 'agent-row' }, toggle, browserBtn, open),
+    body,
+  );
+}
+
+function renderSubagents() {
+  const list = els.agentsList;
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
+  const focusId = focused?.closest('.agent-item')?.dataset.id;
+  const focusRole = focused?.dataset.role;
+  if (subagentsView.error && !subagentsView.items.length) {
+    list.replaceChildren(h('p', { class: 'chat-empty' }, `Subagenten konnten nicht geladen werden: ${subagentsView.error}`));
+    return;
+  }
+  if (!subagentsView.items.length) {
+    list.replaceChildren(h('p', { class: 'chat-empty' }, subagentsView.loaded ? 'Keine Subagenten in diesem Chat.' : 'Wird geladen …'));
+    return;
+  }
+  list.replaceChildren(h('ul', { class: 'agent-tree' }, subagentsView.items.map((i) => agentRow(i))));
+  if (focusId) {
+    const row = list.querySelector(`.agent-item[data-id="${CSS.escape(focusId)}"]`);
+    (focusRole === 'toggle' || focusRole === 'browser' ? row?.querySelector(`[data-role="${focusRole}"]`) : row?.querySelector('a'))?.focus();
+  }
+}
+
+function initAgentsSidebar() {
+  setAgentsSidebar(!narrowMq.matches && load(STORAGE.agentsOpen) === 'open');
+  narrowMq.addEventListener('change', () => {
+    setSidebar(narrowMq.matches ? false : load(STORAGE.sidebar) !== 'closed');
+    setAgentsSidebar(!narrowMq.matches && load(STORAGE.agentsOpen) === 'open');
+  });
+  els.agentsToggle.addEventListener('click', () => setAgentsSidebar(els.app.dataset.agents !== 'open', { focus: true }));
+  els.agentsClose.addEventListener('click', () => setAgentsSidebar(false, { focus: true }));
+  // Aktiven Chat in der Leiste markieren
+  window.addEventListener('hashchange', () => {
+    if (els.app.dataset.agents === 'open') renderSubagents();
+  });
 }
 
 // ---------- Chat-Liste ----------
@@ -602,7 +861,9 @@ function showNewChat() {
   detachTurn();
   state.chatId = null;
   state.chat = null;
+  state.subagentsFor = null;
   setChatTitle(null);
+  resetSubagents();
   els.thread.replaceChildren(emptyState());
   renderChatList();
   // Für neue Chats gilt die Standardauswahl, außer der Nutzer hat bereits etwas gewählt
@@ -632,8 +893,11 @@ async function openChat(id, { refresh = false } = {}) {
   }
   if (seq !== state.openSeq) return;
   const keepScroll = refresh && !nearBottom() ? els.messages.scrollTop : null;
+  const chatChanged = state.subagentsFor !== chat.id;
+  state.subagentsFor = chat.id;
   state.chat = chat;
   setChatTitle(chat.title);
+  if (chatChanged) resetSubagents();
   const known = state.chats.find((c) => c.id === chat.id);
   if (known) Object.assign(known, { title: chat.title, updated_at: chat.updated_at });
   renderChatList();
@@ -801,8 +1065,12 @@ function onTurnEvent(turn, type, d) {
     case 'tool_call':
       view.toolCall(d);
       break;
+    case 'tool_output':
+      view.toolOutput(d);
+      break;
     case 'tool_result':
       view.toolResult(d);
+      if (BROWSER_TOOLS.has(d.name)) refreshBrowser();
       break;
     case 'message':
       view.message(d.message);
@@ -838,6 +1106,7 @@ async function finishTurn(turn, status) {
   // Nach "done" zeigt der Client die gespeicherte Fassung
   if (state.chatId === turn.chatId) await openChat(turn.chatId, { refresh: true });
   refreshChatList();
+  if (els.app.dataset.agents === 'open') refreshSubagents();
 }
 
 /** Verbindung endgültig weg (z. B. Server neu gestartet): Zustand beim Server erfragen. */
@@ -950,6 +1219,7 @@ async function send(resendText) {
       chatId = chat.id;
       state.openSeq++;
       state.chatId = chatId;
+      state.subagentsFor = chatId;
       state.chat = { ...chat, messages: [] };
       setHash(chatId);
       setChatTitle(chat.title);
@@ -966,6 +1236,7 @@ async function send(resendText) {
     scrollToBottom();
     attachTurn(res.turn_id, chatId, { userMessageId: res.user_message?.id || null, providerId });
     refreshChatList();
+    resetSubagents();
   } catch (e) {
     if (fromInput && !els.input.value) {
       els.input.value = text;
@@ -2109,6 +2380,8 @@ function renderRolesPanel() {
 async function init() {
   applyTheme(load(STORAGE.theme) || 'system');
   initSidebar();
+  initAgentsSidebar();
+  initBrowserButton();
   initComposer();
   initKeyboard();
   initSettings();

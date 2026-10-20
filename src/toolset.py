@@ -31,7 +31,9 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Optional, get_type_hints
 
-from chat_types import Emit, Event, ev_tool_call, ev_tool_result
+import contextvars
+
+from chat_types import Emit, Event, ev_tool_call, ev_tool_output, ev_tool_result
 
 if TYPE_CHECKING:
     import lmstudio as lms
@@ -52,6 +54,28 @@ ERROR_PREFIX = "Fehler:"
 
 _MISSING = object()
 _VAR_KINDS = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+
+
+# --- Live-Ausgabe und Abbruch für Tools ------------------------------------------
+
+_live: contextvars.ContextVar[Callable[[str, str], None] | None] = contextvars.ContextVar("_live", default=None)
+_cancel_event: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar("_cancel_event", default=None)
+
+
+def stream_output(text: str, stream: str = "stdout") -> None:
+    """Sendet ``text`` als Live-Ausgabe des gerade laufenden Tools (``tool_output``-Event).
+
+    Wirkt nur innerhalb von ``ToolSet.execute``; sonst passiert nichts.
+    """
+    sink = _live.get()
+    if sink is not None and text:
+        sink(text, stream)
+
+
+def tool_cancelled() -> bool:
+    """``True``, wenn der Turn des laufenden Tools abgebrochen wurde."""
+    event = _cancel_event.get()
+    return event is not None and event.is_set()
 
 
 # --- Datentypen ----------------------------------------------------------------
@@ -513,6 +537,8 @@ class ToolSet:
         self._lock = threading.RLock()
         self._specs: dict[str, ToolSpec] = {}
         self.approval_hook: ApprovalHook | None = None
+        self.cancel_event: threading.Event | None = None
+        """Wird beim Abbruch des Turns gesetzt; laufende Tools können es per ``tool_cancelled()`` prüfen."""
         for spec in specs:
             self.add(spec)
 
@@ -527,6 +553,7 @@ class ToolSet:
         result = cls(items)
         if isinstance(items, ToolSet):
             result.approval_hook = items.approval_hook
+            result.cancel_event = items.cancel_event
         return result
 
     # -- Verwaltung --
@@ -588,6 +615,7 @@ class ToolSet:
         """
         result = ToolSet(self)
         result.approval_hook = self.approval_hook
+        result.cancel_event = self.cancel_event
         for item in other:
             result.add(item)
         return result
@@ -669,8 +697,17 @@ class ToolSet:
             if denial is not None:
                 text = denial
             else:
+                def sink(chunk: str, stream: str, _id: str = call_id, _name: str = name) -> None:
+                    _emit_safe(emit, ev_tool_output(_id, _name, chunk, stream))
+
+                token = _live.set(sink)
+                cancel_token = _cancel_event.set(self.cancel_event)
                 start = time.perf_counter()
-                text = self._invoke(spec, args)
+                try:
+                    text = self._invoke(spec, args)
+                finally:
+                    _live.reset(token)
+                    _cancel_event.reset(cancel_token)
                 duration_ms = int((time.perf_counter() - start) * 1000)
 
         is_error = text.startswith(ERROR_PREFIX)

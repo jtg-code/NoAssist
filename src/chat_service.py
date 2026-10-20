@@ -646,6 +646,12 @@ class ChatService:
             if self._closed.is_set():
                 return
             self._closed.set()
+            try:
+                from browser import manager
+
+                threading.Thread(target=manager.shutdown, name="browser-shutdown", daemon=True).start()
+            except Exception:
+                log.debug("Browser nicht beendet", exc_info=True)
             turns = list(self._active.values())
             workers = [t._thread for t in self._turns.values() if t._thread is not None]
         for turn in turns:
@@ -1406,6 +1412,12 @@ class ChatService:
             turn = self._active.get(chat_id)
         if turn is not None and not turn.finished:
             self._request_cancel(turn)
+        try:
+            from browser import manager
+
+            manager.close_chat(chat_id)
+        except Exception:
+            log.debug("Browser von Chat %s nicht geschlossen", chat_id, exc_info=True)
         return self.store.delete_chat(chat_id)
 
     # ------------------------------------------------------------------ Turns
@@ -1671,6 +1683,10 @@ class ChatService:
             tools = self._turn_tools()
             for name in ctx.exclude_tools:
                 tools.remove(name)
+            from tools import bind_caller
+
+            bind_caller(tools, turn.chat_id)
+            tools.cancel_event = turn.cancel
             session = Session(
                 system_prompt=ctx.system_prompt,
                 model=ctx.model,
